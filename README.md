@@ -10,10 +10,14 @@ The project includes a Streamlit web interface so the solver can be used from a 
 - Base-3 encoding for the 243 possible feedback patterns
 - Precomputed guess × answer feedback table for fast repeated scoring
 - Entropy-based guess ranking
+- Detailed recommendation metrics: expected remaining answers, worst-case split, and partition count
 - Normal Mode ranks the full allowed-guess vocabulary, including information-gathering probe words
 - Wordle-style Hard Mode keeps revealed green/yellow hints while still allowing legal probe words
 - Clickable gray/yellow/green feedback tiles in the web interface
 - Responsive mobile-friendly Streamlit layout
+- Solver and Analysis tabs for gameplay and deeper statistics
+- Session-level custom possible answers for newly introduced or missing words
+- Candidate Only mode for solution-only recommendations
 - Memory-efficient one-byte feedback cache for web deployment
 - Interactive multi-game solver
 - Simulation support in the Python engine
@@ -239,6 +243,16 @@ Streamlit will install the packages in `requirements.txt` and start the applicat
 
 No API keys or secrets are currently required for this project.
 
+# Custom possible answers
+
+The sidebar includes **Add possible answer** for five-letter words that are missing from the built-in answer list.
+
+Custom answers are intentionally stored only in the current browser session. This keeps a public Streamlit deployment from modifying the GitHub repository or changing the canonical word list for every user.
+
+If a custom answer matches feedback already entered in the current game, it joins the current candidate pool immediately. Otherwise, it is saved for the session and will be available in the next game.
+
+The app also provides a **Download additions** button so session additions can be reviewed and later committed to the repository if desired.
+
 # Solver modes
 
 ## Normal Mode
@@ -247,7 +261,11 @@ The solver scores every word in `allowed_guesses.txt`, so it can recommend infor
 
 ## Hard Mode
 
-Hard Mode keeps revealed hints in future guesses: green letters stay fixed, yellow letters must move from their known-wrong positions, and revealed duplicate-letter minimums are retained. This is intentionally different from restricting guesses to only the remaining possible answers.
+Hard Mode keeps revealed hints in future guesses: green letters stay fixed, yellow letters must move from their known-wrong positions, and revealed duplicate-letter minimums are retained.
+
+## Candidate Only
+
+Candidate Only mode restricts recommendations to words that are still possible solutions. This is useful when you prefer to solve directly instead of playing an information-gathering probe word.
 
 # Feedback
 
