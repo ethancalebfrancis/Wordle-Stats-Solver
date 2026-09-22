@@ -10,9 +10,11 @@ The project now includes a Streamlit web interface so the solver can be used fro
 - Base-3 encoding for the 243 possible feedback patterns
 - Precomputed guess × answer feedback table for fast repeated scoring
 - Entropy-based guess ranking
-- Normal/adaptive mode using the full allowed-guess vocabulary for information-gathering guesses
-- Hard mode restricted to remaining candidate answers
-- Configurable adaptive candidate cutoff
+- Normal Mode ranks the full allowed-guess vocabulary, including information-gathering probe words
+- Wordle-style Hard Mode keeps revealed green/yellow hints while still allowing legal probe words
+- Clickable gray/yellow/green feedback tiles in the web interface
+- Responsive mobile-friendly Streamlit layout
+- Memory-efficient one-byte feedback cache for web deployment
 - Interactive multi-game solver
 - Simulation support in the Python engine
 - Optional CSV game-history logging in the CLI engine
@@ -59,13 +61,13 @@ Streamlit will print a local URL, normally `http://localhost:8501`.
 
 ## Solver modes
 
-### Normal / Adaptive
+### Normal Mode
 
-The solver can score every word in `allowed_guesses.txt`, allowing information-gathering guesses that are not currently possible answers. Once the candidate pool reaches the configured cutoff, it switches to candidate-only guesses.
+The solver scores every word in `allowed_guesses.txt`, so it can recommend information-gathering guesses that are not currently possible answers.
 
 ### Hard Mode
 
-Suggestions are restricted to the remaining candidate answers.
+Hard Mode keeps revealed hints in future guesses: green letters stay fixed, yellow letters must move from their known-wrong positions, and revealed duplicate-letter minimums are retained. This is intentionally different from restricting guesses to only the remaining possible answers.
 
 ## Feedback format
 
