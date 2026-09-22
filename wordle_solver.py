@@ -59,6 +59,14 @@ def feedback_string_to_code(feedback: str) -> int:
     return code
 
 
+def feedback_code_to_string(code: int) -> str:
+    digits = []
+    for _ in range(5):
+        digits.append(str(code % 3))
+        code //= 3
+    return "".join(digits)
+
+
 def load_words(
     answers_path: str = "possible_answers.txt",
     guesses_path: Optional[str] = "allowed_guesses.txt",
@@ -128,13 +136,17 @@ class WordleModel:
         self.guess_index: Dict[str, int] = {w: i for i, w in enumerate(self.allowed_guesses)}
 
         G, A = len(self.allowed_guesses), len(self.answers)
-        self.pattern_table = [[0] * A for _ in range(G)]
+
+        # A feedback code is always 0..242, so one byte per guess/answer pair is enough.
+        # This keeps the full 14k x 2k cache practical for a web deployment.
+        self.pattern_table = [bytearray(A) for _ in range(G)]
 
         for gi, guess in enumerate(
             tqdm(self.allowed_guesses, desc="Building pattern table", unit="guess")
         ):
+            row = self.pattern_table[gi]
             for ai, answer in enumerate(self.answers):
-                self.pattern_table[gi][ai] = feedback_code(guess, answer)
+                row[ai] = feedback_code(guess, answer)
 
     def fb_cached(self, guess_idx: int, answer_idx: int) -> int:
         return self.pattern_table[guess_idx][answer_idx]
@@ -171,15 +183,64 @@ class WordleModel:
 
         return exp_bits
 
+    def hard_mode_guess_indices(
+        self,
+        history: List[Tuple[str, str]],
+    ) -> List[int]:
+        """Return guesses that reuse every revealed green/yellow hint.
+
+        Hard Mode is intentionally different from "remaining answers only":
+        probe words are still legal if they keep green letters fixed, move yellow
+        letters away from known-wrong positions, and include the minimum number of
+        copies of each revealed letter.
+        """
+        greens: Dict[int, str] = {}
+        yellow_blocked: Dict[int, set[str]] = defaultdict(set)
+        minimum_counts: Dict[str, int] = defaultdict(int)
+
+        for guess, feedback in history:
+            turn_counts: Dict[str, int] = defaultdict(int)
+
+            for i, (letter, result) in enumerate(zip(guess, feedback)):
+                if result == "2":
+                    greens[i] = letter
+                    turn_counts[letter] += 1
+                elif result == "1":
+                    yellow_blocked[i].add(letter)
+                    turn_counts[letter] += 1
+
+            for letter, count in turn_counts.items():
+                minimum_counts[letter] = max(minimum_counts[letter], count)
+
+        legal: List[int] = []
+
+        for gi, word in enumerate(self.allowed_guesses):
+            if any(word[pos] != letter for pos, letter in greens.items()):
+                continue
+
+            if any(word[pos] in blocked for pos, blocked in yellow_blocked.items()):
+                continue
+
+            counts = Counter(word)
+            if any(counts[letter] < needed for letter, needed in minimum_counts.items()):
+                continue
+
+            legal.append(gi)
+
+        return legal
+
     def rank_guesses_fast(
         self,
         candidate_idxs: List[int],
         strategy: str = "adaptive",
         candidate_cutover: int = 25,
         top_k: int = 15,
+        history: Optional[List[Tuple[str, str]]] = None,
     ) -> List[Tuple[str, float]]:
-        if strategy not in {"all", "candidates", "adaptive"}:
-            raise ValueError("strategy must be 'all', 'candidates', or 'adaptive'")
+        if strategy not in {"all", "candidates", "adaptive", "hard"}:
+            raise ValueError(
+                "strategy must be 'all', 'candidates', 'adaptive', or 'hard'"
+            )
 
         if not candidate_idxs:
             return []
@@ -189,7 +250,9 @@ class WordleModel:
             or (strategy == "adaptive" and len(candidate_idxs) <= candidate_cutover)
         )
 
-        if use_candidates_only:
+        if strategy == "hard":
+            guess_space = self.hard_mode_guess_indices(history or [])
+        elif use_candidates_only:
             guess_space: List[int] = []
             for ai in candidate_idxs:
                 word = self.answers[ai]
@@ -214,7 +277,6 @@ class WordleModel:
                 (gi, self.expected_information_cached(gi, candidate_idxs))
             )
 
-        # Prefer a remaining answer when information scores tie.
         candidate_words = {self.answers[ai] for ai in candidate_idxs}
         scored.sort(
             key=lambda item: (
@@ -253,6 +315,7 @@ class WordleModel:
             candidate_idxs = list(range(len(self.answers)))
             guesses_used = 0
             seq: list[str] = []
+            history: List[Tuple[str, str]] = []
 
             if first_guess:
                 if first_guess not in self.guess_index:
@@ -263,9 +326,9 @@ class WordleModel:
             else:
                 ranked = self.rank_guesses_fast(
                     candidate_idxs,
-                    strategy=("candidates" if hard_mode else "adaptive"),
-                    candidate_cutover=25,
+                    strategy=("hard" if hard_mode else "all"),
                     top_k=1,
+                    history=history,
                 )
                 gi = self.guess_index[ranked[0][0]]
 
@@ -275,6 +338,9 @@ class WordleModel:
                 seq.append(guess_word)
 
                 fb_code = self.fb_cached(gi, hidden_ai)
+                fb_string = feedback_code_to_string(fb_code)
+                history.append((guess_word, fb_string))
+
                 if fb_code == ALL_GREEN:
                     break
 
@@ -286,9 +352,9 @@ class WordleModel:
 
                 ranked = self.rank_guesses_fast(
                     candidate_idxs,
-                    strategy=("candidates" if hard_mode else "adaptive"),
-                    candidate_cutover=25,
+                    strategy=("hard" if hard_mode else "all"),
                     top_k=1,
+                    history=history,
                 )
                 gi = self.guess_index[ranked[0][0]]
 
