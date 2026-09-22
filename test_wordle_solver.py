@@ -26,6 +26,33 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(feedback.count("1") + feedback.count("2"), 3)
 
 
+class DetailedRankingTests(unittest.TestCase):
+    def setUp(self):
+        answers = ["cigar", "rebut", "sissy", "humph"]
+        guesses = answers + ["cairn", "caper", "curry", "arise"]
+        self.model = WordleModel(answers, guesses)
+
+    def test_guess_metrics_include_expected_and_worst_case(self):
+        metrics = self.model.guess_metrics(
+            "cigar",
+            list(range(len(self.model.answers))),
+        )
+        self.assertGreaterEqual(metrics["entropy"], 0)
+        self.assertGreaterEqual(metrics["expected_remaining"], 1)
+        self.assertGreaterEqual(metrics["worst_case"], 1)
+        self.assertGreaterEqual(metrics["partitions"], 1)
+
+    def test_custom_answer_can_be_ranked(self):
+        ranked = self.model.rank_guesses_detailed(
+            list(range(len(self.model.answers))),
+            strategy="candidates",
+            custom_answers=["arise"],
+            top_k=10,
+        )
+        words = {item["word"] for item in ranked}
+        self.assertIn("arise", words)
+
+
 class HardModeTests(unittest.TestCase):
     def setUp(self):
         answers = ["cigar", "rebut", "sissy", "humph"]
@@ -48,6 +75,11 @@ class HardModeTests(unittest.TestCase):
             for i in self.model.hard_mode_guess_indices(history)
         }
         self.assertNotIn("arise", legal)
+
+    def test_custom_word_can_be_checked_for_hard_mode(self):
+        history = [("cigar", "20000")]
+        self.assertTrue(self.model.is_hard_mode_legal("cairn", history))
+        self.assertFalse(self.model.is_hard_mode_legal("arise", history))
 
 
 if __name__ == "__main__":
