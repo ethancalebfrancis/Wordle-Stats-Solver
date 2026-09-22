@@ -96,8 +96,8 @@ def reset_game(model: WordleModel):
     st.session_state.candidates = list(range(len(model.answers)))
     st.session_state.history = []
     st.session_state.solved = False
+    st.session_state.game_id = st.session_state.get("game_id", 0) + 1
     reset_feedback()
-    st.session_state.pop("guess_input", None)
 
 
 def render_feedback_row(word: str, feedback: str):
@@ -193,10 +193,16 @@ else:
 if "guess_input" not in st.session_state:
     st.session_state.guess_input = recommended
 
+guess_key = (
+    f"guess_input_{st.session_state.game_id}_"
+    f"{len(st.session_state.history)}"
+)
+
 guess = st.text_input(
     "Guess",
+    value=recommended,
     max_chars=5,
-    key="guess_input",
+    key=guess_key,
     placeholder="Enter a 5-letter word",
 ).strip().lower()
 
@@ -206,8 +212,22 @@ guess_valid = (
     and guess in model.guess_index
 )
 
+hard_mode_legal = True
+if hard_mode and guess_valid:
+    legal_indices = model.hard_mode_guess_indices(st.session_state.history)
+    legal_words = {
+        model.allowed_guesses[gi]
+        for gi in legal_indices
+    }
+    hard_mode_legal = guess in legal_words
+
 if guess and not guess_valid:
     st.warning("Enter a five-letter word from the allowed guess list.")
+elif guess_valid and hard_mode and not hard_mode_legal:
+    st.warning(
+        "That guess does not reuse all revealed hints, so it is not legal "
+        "in Hard Mode."
+    )
 
 st.write("Tap each tile to cycle **gray → yellow → green**.")
 
@@ -237,7 +257,11 @@ with apply_col:
         "Apply feedback",
         type="primary",
         use_container_width=True,
-        disabled=not guess_valid or st.session_state.solved,
+        disabled=(
+            not guess_valid
+            or not hard_mode_legal
+            or st.session_state.solved
+        ),
     )
 
 with new_col:
@@ -261,7 +285,6 @@ if apply_feedback:
         )
 
     reset_feedback()
-    st.session_state.pop("guess_input", None)
     st.rerun()
 
 if st.session_state.solved:
