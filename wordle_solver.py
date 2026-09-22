@@ -183,17 +183,12 @@ class WordleModel:
 
         return exp_bits
 
-    def hard_mode_guess_indices(
+    def is_hard_mode_legal(
         self,
+        word: str,
         history: List[Tuple[str, str]],
-    ) -> List[int]:
-        """Return guesses that reuse every revealed green/yellow hint.
-
-        Hard Mode is intentionally different from "remaining answers only":
-        probe words are still legal if they keep green letters fixed, move yellow
-        letters away from known-wrong positions, and include the minimum number of
-        copies of each revealed letter.
-        """
+    ) -> bool:
+        """Return whether a word obeys all revealed Wordle Hard Mode hints."""
         greens: Dict[int, str] = {}
         yellow_blocked: Dict[int, set[str]] = defaultdict(set)
         minimum_counts: Dict[str, int] = defaultdict(int)
@@ -212,22 +207,142 @@ class WordleModel:
             for letter, count in turn_counts.items():
                 minimum_counts[letter] = max(minimum_counts[letter], count)
 
-        legal: List[int] = []
+        if any(word[pos] != letter for pos, letter in greens.items()):
+            return False
 
-        for gi, word in enumerate(self.allowed_guesses):
-            if any(word[pos] != letter for pos, letter in greens.items()):
-                continue
+        if any(word[pos] in blocked for pos, blocked in yellow_blocked.items()):
+            return False
 
-            if any(word[pos] in blocked for pos, blocked in yellow_blocked.items()):
-                continue
+        counts = Counter(word)
+        if any(counts[letter] < needed for letter, needed in minimum_counts.items()):
+            return False
 
-            counts = Counter(word)
-            if any(counts[letter] < needed for letter, needed in minimum_counts.items()):
-                continue
+        return True
 
-            legal.append(gi)
+    def hard_mode_guess_indices(
+        self,
+        history: List[Tuple[str, str]],
+    ) -> List[int]:
+        """Return allowed-list guesses that obey every revealed Hard Mode hint."""
+        return [
+            gi
+            for gi, word in enumerate(self.allowed_guesses)
+            if self.is_hard_mode_legal(word, history)
+        ]
 
-        return legal
+    def guess_metrics(
+        self,
+        guess_word: str,
+        candidate_idxs: List[int],
+        custom_answers: Optional[List[str]] = None,
+    ) -> Dict[str, float | int]:
+        """Return entropy plus expected/worst-case remaining candidates."""
+        custom_answers = custom_answers or []
+        buckets: Dict[int, int] = defaultdict(int)
+        gi = self.guess_index.get(guess_word)
+
+        if gi is not None:
+            row = self.pattern_table[gi]
+            for ai in candidate_idxs:
+                buckets[row[ai]] += 1
+        else:
+            for ai in candidate_idxs:
+                buckets[feedback_code(guess_word, self.answers[ai])] += 1
+
+        for answer in custom_answers:
+            buckets[feedback_code(guess_word, answer)] += 1
+
+        total = len(candidate_idxs) + len(custom_answers)
+        if total == 0:
+            return {
+                "entropy": 0.0,
+                "expected_remaining": 0.0,
+                "worst_case": 0,
+                "partitions": 0,
+            }
+
+        entropy = 0.0
+        expected_remaining = 0.0
+        for count in buckets.values():
+            p = count / total
+            entropy += -p * log2(p)
+            expected_remaining += p * count
+
+        return {
+            "entropy": entropy,
+            "expected_remaining": expected_remaining,
+            "worst_case": max(buckets.values()),
+            "partitions": len(buckets),
+        }
+
+    def rank_guesses_detailed(
+        self,
+        candidate_idxs: List[int],
+        strategy: str = "all",
+        top_k: int = 10,
+        history: Optional[List[Tuple[str, str]]] = None,
+        custom_answers: Optional[List[str]] = None,
+    ) -> List[Dict[str, object]]:
+        """Rank guesses and return richer metrics for the web UI."""
+        if strategy not in {"all", "candidates", "hard"}:
+            raise ValueError("strategy must be 'all', 'candidates', or 'hard'")
+
+        history = history or []
+        custom_answers = custom_answers or []
+        candidate_words = {self.answers[ai] for ai in candidate_idxs}
+        candidate_words.update(custom_answers)
+
+        if strategy == "candidates":
+            guess_words = list(candidate_words)
+        elif strategy == "hard":
+            guess_words = [
+                word
+                for word in self.allowed_guesses
+                if self.is_hard_mode_legal(word, history)
+            ]
+            for word in custom_answers:
+                if (
+                    word not in self.guess_index
+                    and self.is_hard_mode_legal(word, history)
+                ):
+                    guess_words.append(word)
+        else:
+            guess_words = list(self.allowed_guesses)
+            for word in custom_answers:
+                if word not in self.guess_index:
+                    guess_words.append(word)
+
+        scored: List[Dict[str, object]] = []
+        iterable = (
+            tqdm(guess_words, desc="Scoring guesses", unit="guess", leave=False)
+            if len(guess_words) > 200
+            else guess_words
+        )
+
+        for word in iterable:
+            metrics = self.guess_metrics(
+                word,
+                candidate_idxs,
+                custom_answers,
+            )
+            scored.append({
+                "word": word,
+                "entropy": metrics["entropy"],
+                "expected_remaining": metrics["expected_remaining"],
+                "worst_case": metrics["worst_case"],
+                "partitions": metrics["partitions"],
+                "is_candidate": word in candidate_words,
+            })
+
+        scored.sort(
+            key=lambda item: (
+                item["entropy"],
+                item["is_candidate"],
+                -item["expected_remaining"],
+            ),
+            reverse=True,
+        )
+        return scored[:top_k]
 
     def rank_guesses_fast(
         self,
