@@ -92,8 +92,16 @@ st.markdown(
 )
 
 
+MODEL_CACHE_VERSION = "2026-09-22-v2"
+
+
 @st.cache_resource(show_spinner="Building statistical model...")
-def build_model() -> WordleModel:
+def build_model(model_cache_version: str) -> WordleModel:
+    """Build the solver model.
+
+    model_cache_version is deliberately part of the cache key so changes to
+    WordleModel can invalidate an older Streamlit resource instance.
+    """
     answers, guesses = load_words(str(ANSWERS_PATH), str(GUESSES_PATH))
     return WordleModel(answers, guesses, logger=None)
 
@@ -226,7 +234,13 @@ if not ANSWERS_PATH.exists() or not GUESSES_PATH.exists():
     st.stop()
 
 try:
-    model = build_model()
+    model = build_model(MODEL_CACHE_VERSION)
+
+    # Streamlit can preserve a cached resource across code updates in imported
+    # modules. If the cached object predates a new solver method, rebuild it.
+    if not hasattr(model, "rank_guesses_detailed"):
+        build_model.clear()
+        model = build_model(MODEL_CACHE_VERSION)
 except Exception as exc:
     st.error(f"Could not build the Wordle model: {exc}")
     st.stop()
