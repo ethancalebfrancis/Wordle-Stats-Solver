@@ -3,7 +3,12 @@ import html
 
 import streamlit as st
 
-from wordle_solver import WordleModel, feedback_string_to_code, load_words
+from wordle_solver import (
+    WordleModel,
+    feedback_code,
+    feedback_string_to_code,
+    load_words,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -34,8 +39,8 @@ st.markdown(
     """
     <style>
     .block-container {
-        max-width: 760px;
-        padding-top: 1.5rem;
+        max-width: 820px;
+        padding-top: 1.25rem;
         padding-bottom: 3rem;
     }
 
@@ -59,11 +64,16 @@ st.markdown(
         text-transform: uppercase;
     }
 
+    .mode-note {
+        opacity: 0.8;
+        font-size: 0.9rem;
+    }
+
     @media (max-width: 600px) {
         .block-container {
             padding-left: 0.8rem;
             padding-right: 0.8rem;
-            padding-top: 0.75rem;
+            padding-top: 0.7rem;
         }
 
         .wordle-tile {
@@ -94,14 +104,15 @@ def get_ranked_guesses(
     candidate_idxs: tuple[int, ...],
     strategy: str,
     history: tuple[tuple[str, str], ...],
+    custom_candidates: tuple[str, ...],
     top_k: int = 10,
 ):
-    """Cache expensive entropy ranking until the actual game state changes."""
-    return _model.rank_guesses_fast(
+    return _model.rank_guesses_detailed(
         list(candidate_idxs),
         strategy=strategy,
         top_k=top_k,
         history=list(history),
+        custom_answers=list(custom_candidates),
     )
 
 
@@ -116,8 +127,13 @@ def cycle_feedback(index: int):
 
 
 def reset_game(model: WordleModel):
+    if "custom_answers" not in st.session_state:
+        st.session_state.custom_answers = []
+
     st.session_state.candidates = list(range(len(model.answers)))
+    st.session_state.custom_candidates = list(st.session_state.custom_answers)
     st.session_state.history = []
+    st.session_state.turn_stats = []
     st.session_state.solved = False
     st.session_state.game_id = st.session_state.get("game_id", 0) + 1
     reset_feedback()
@@ -138,6 +154,70 @@ def render_feedback_row(word: str, feedback: str):
     )
 
 
+def custom_word_matches_history(word: str) -> bool:
+    for prior_guess, prior_feedback in st.session_state.history:
+        if feedback_code(prior_guess, word) != feedback_string_to_code(prior_feedback):
+            return False
+    return True
+
+
+def add_custom_answer(model: WordleModel, word: str):
+    word = word.strip().lower()
+
+    if len(word) != 5 or not word.isalpha():
+        st.session_state.custom_answer_message = (
+            "error",
+            "A possible answer must contain exactly five letters.",
+        )
+        return
+
+    if word in model.answer_index:
+        st.session_state.custom_answer_message = (
+            "info",
+            f"{word.upper()} is already in the built-in possible-answer list.",
+        )
+        return
+
+    if word in st.session_state.custom_answers:
+        st.session_state.custom_answer_message = (
+            "info",
+            f"{word.upper()} is already in your custom answer list.",
+        )
+        return
+
+    st.session_state.custom_answers.append(word)
+
+    if custom_word_matches_history(word):
+        st.session_state.custom_candidates.append(word)
+        message = (
+            f"Added {word.upper()} to this session and to the current candidate pool."
+        )
+    else:
+        message = (
+            f"Added {word.upper()} to this session, but it does not match the "
+            "feedback already entered in this game."
+        )
+
+    st.session_state.custom_answer_message = ("success", message)
+
+
+def filter_base_candidates(
+    model: WordleModel,
+    candidate_idxs: list[int],
+    guess: str,
+    fb_code: int,
+) -> list[int]:
+    gi = model.guess_index.get(guess)
+    if gi is not None:
+        return model.filter_candidates_cached(candidate_idxs, gi, fb_code)
+
+    return [
+        ai
+        for ai in candidate_idxs
+        if feedback_code(guess, model.answers[ai]) == fb_code
+    ]
+
+
 st.title("Wordle Stats Solver")
 st.caption("Statistical Wordle solving with expected-information ranking")
 
@@ -151,6 +231,9 @@ except Exception as exc:
     st.error(f"Could not build the Wordle model: {exc}")
     st.stop()
 
+if "custom_answers" not in st.session_state:
+    st.session_state.custom_answers = []
+
 if "candidates" not in st.session_state:
     reset_game(model)
 
@@ -160,12 +243,13 @@ if "feedback_tiles" not in st.session_state:
 with st.sidebar:
     st.header("Settings")
 
-    hard_mode = st.toggle(
-        "Wordle Hard Mode",
-        value=False,
+    mode = st.selectbox(
+        "Solver mode",
+        ["Normal", "Hard", "Candidate Only"],
+        index=0,
         help=(
-            "Keeps every revealed green and yellow hint in future guesses. "
-            "Unlike candidate-only mode, legal information-gathering guesses can still appear."
+            "Normal scores every allowed guess. Hard keeps revealed hints. "
+            "Candidate Only only recommends words that can still be the answer."
         ),
     )
 
@@ -175,221 +259,359 @@ with st.sidebar:
         max_chars=5,
     ).strip().lower()
 
+    if mode == "Normal":
+        st.caption("Best information-gathering guess from the full allowed list.")
+    elif mode == "Hard":
+        st.caption("Only guesses that reuse all revealed green/yellow hints.")
+    else:
+        st.caption("Only words that are still possible answers.")
+
+    st.divider()
+    st.subheader("Custom possible answers")
     st.caption(
-        "Normal Mode ranks the entire allowed-guess list. "
-        "Hard Mode ranks only guesses that obey revealed hints."
+        "Adds a missing word for your browser session. Public users cannot "
+        "rewrite the GitHub repository."
     )
 
+    custom_word = st.text_input(
+        "Add a 5-letter answer",
+        key="custom_answer_input",
+        max_chars=5,
+        placeholder="e.g. newwd",
+    ).strip().lower()
+
+    if st.button("Add possible answer", use_container_width=True):
+        add_custom_answer(model, custom_word)
+        st.rerun()
+
+    message = st.session_state.pop("custom_answer_message", None)
+    if message:
+        kind, text = message
+        if kind == "error":
+            st.error(text)
+        elif kind == "success":
+            st.success(text)
+        else:
+            st.info(text)
+
+    if st.session_state.custom_answers:
+        st.write(
+            "**Session additions:** "
+            + ", ".join(w.upper() for w in st.session_state.custom_answers)
+        )
+        st.download_button(
+            "Download additions",
+            data="\n".join(st.session_state.custom_answers) + "\n",
+            file_name="custom_possible_answers.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    st.divider()
     if st.button("New game", use_container_width=True):
         reset_game(model)
         st.rerun()
 
-strategy = "hard" if hard_mode else "all"
+strategy = {
+    "Normal": "all",
+    "Hard": "hard",
+    "Candidate Only": "candidates",
+}[mode]
 
 ranked = get_ranked_guesses(
     model,
     tuple(st.session_state.candidates),
     strategy,
     tuple(st.session_state.history),
+    tuple(st.session_state.custom_candidates),
     10,
 )
 
-remaining = len(st.session_state.candidates)
+remaining = (
+    len(st.session_state.candidates)
+    + len(st.session_state.custom_candidates)
+)
 
-metric1, metric2 = st.columns(2)
+metric1, metric2, metric3 = st.columns(3)
 metric1.metric("Remaining", f"{remaining:,}")
 metric2.metric("Guesses", len(st.session_state.history))
+metric3.metric("Mode", mode)
 
 if remaining == 0:
     st.error("No answers match the feedback so far. Check the last row you entered.")
 elif remaining == 1 and not st.session_state.solved:
-    answer = model.answers[st.session_state.candidates[0]]
+    if st.session_state.custom_candidates:
+        answer = st.session_state.custom_candidates[0]
+    else:
+        answer = model.answers[st.session_state.candidates[0]]
     st.info(f"Only one candidate remains: **{answer.upper()}**")
 
-st.subheader("Your next guess")
+solver_tab, analysis_tab = st.tabs(["Solver", "Analysis"])
 
-default_suggestion = ranked[0][0] if ranked else ""
-if not st.session_state.history and first_guess in model.guess_index:
-    recommended = first_guess
-else:
-    recommended = default_suggestion
+with solver_tab:
+    st.subheader("Your next guess")
 
-guess_key = (
-    f"guess_input_{st.session_state.game_id}_"
-    f"{len(st.session_state.history)}"
-)
+    default_suggestion = ranked[0]["word"] if ranked else ""
+    if (
+        not st.session_state.history
+        and (
+            first_guess in model.guess_index
+            or first_guess in st.session_state.custom_answers
+        )
+    ):
+        recommended = first_guess
+    else:
+        recommended = default_suggestion
 
-guess = st.text_input(
-    "Guess",
-    value=recommended,
-    max_chars=5,
-    key=guess_key,
-    placeholder="Enter a 5-letter word",
-).strip().lower()
-
-guess_valid = (
-    len(guess) == 5
-    and guess.isalpha()
-    and guess in model.guess_index
-)
-
-hard_mode_legal = True
-if hard_mode and guess_valid:
-    legal_indices = model.hard_mode_guess_indices(st.session_state.history)
-    legal_words = {
-        model.allowed_guesses[gi]
-        for gi in legal_indices
-    }
-    hard_mode_legal = guess in legal_words
-
-if guess and not guess_valid:
-    st.warning("Enter a five-letter word from the allowed guess list.")
-elif guess_valid and hard_mode and not hard_mode_legal:
-    st.warning(
-        "That guess does not reuse all revealed hints, so it is not legal "
-        "in Hard Mode."
+    guess_key = (
+        f"guess_input_{st.session_state.game_id}_"
+        f"{len(st.session_state.history)}"
     )
 
-st.write("Tap each tile to cycle **gray → yellow → green**.")
+    guess = st.text_input(
+        "Guess",
+        value=recommended,
+        max_chars=5,
+        key=guess_key,
+        placeholder="Enter a 5-letter word",
+    ).strip().lower()
 
+    guess_valid = (
+        len(guess) == 5
+        and guess.isalpha()
+        and (
+            guess in model.guess_index
+            or guess in st.session_state.custom_answers
+        )
+    )
 
-@st.fragment
-def feedback_controls(
-    current_guess: str,
-    valid_guess: bool,
-    hard_legal: bool,
-):
-    tile_columns = st.columns(5)
+    hard_mode_legal = True
+    if mode == "Hard" and guess_valid:
+        hard_mode_legal = model.is_hard_mode_legal(
+            guess,
+            st.session_state.history,
+        )
 
-    for i, col in enumerate(tile_columns):
-        letter = current_guess[i].upper() if len(current_guess) == 5 else "?"
-        state = st.session_state.feedback_tiles[i]
+    candidate_only_legal = True
+    if mode == "Candidate Only" and guess_valid:
+        candidate_words = {
+            model.answers[ai]
+            for ai in st.session_state.candidates
+        }
+        candidate_words.update(st.session_state.custom_candidates)
+        candidate_only_legal = guess in candidate_words
 
-        with col:
-            st.button(
-                f"{FEEDBACK_LABELS[state]} {letter}",
-                key=f"feedback_tile_{st.session_state.game_id}_{len(st.session_state.history)}_{i}",
+    if guess and not guess_valid:
+        st.warning(
+            "That word is not in the allowed guess list or your custom possible answers."
+        )
+    elif guess_valid and mode == "Hard" and not hard_mode_legal:
+        st.warning("That guess does not reuse all revealed hints.")
+    elif guess_valid and mode == "Candidate Only" and not candidate_only_legal:
+        st.warning("Candidate Only mode requires a remaining possible answer.")
+
+    if ranked:
+        top = ranked[0]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Top entropy", f"{top['entropy']:.3f} bits")
+        c2.metric("Expected left", f"{top['expected_remaining']:.1f}")
+        c3.metric("Worst case", int(top["worst_case"]))
+
+    st.write("Tap each tile to cycle **gray → yellow → green**.")
+
+    @st.fragment
+    def feedback_controls(
+        current_guess: str,
+        valid_guess: bool,
+        hard_legal: bool,
+        candidate_legal: bool,
+    ):
+        tile_columns = st.columns(5)
+
+        for i, col in enumerate(tile_columns):
+            letter = (
+                current_guess[i].upper()
+                if len(current_guess) == 5
+                else "?"
+            )
+            state = st.session_state.feedback_tiles[i]
+
+            with col:
+                st.button(
+                    f"{FEEDBACK_LABELS[state]} {letter}",
+                    key=(
+                        f"feedback_tile_{st.session_state.game_id}_"
+                        f"{len(st.session_state.history)}_{i}"
+                    ),
+                    use_container_width=True,
+                    on_click=cycle_feedback,
+                    args=(i,),
+                )
+
+        feedback = "".join(
+            str(value)
+            for value in st.session_state.feedback_tiles
+        )
+
+        if len(current_guess) == 5:
+            render_feedback_row(current_guess, feedback)
+
+        apply_col, clear_col = st.columns([2, 1])
+
+        with apply_col:
+            apply_feedback = st.button(
+                "Apply feedback",
+                type="primary",
                 use_container_width=True,
-                on_click=cycle_feedback,
-                args=(i,),
+                disabled=(
+                    not valid_guess
+                    or not hard_legal
+                    or not candidate_legal
+                    or st.session_state.solved
+                ),
+                key=(
+                    f"apply_feedback_{st.session_state.game_id}_"
+                    f"{len(st.session_state.history)}"
+                ),
             )
 
-    feedback = "".join(str(value) for value in st.session_state.feedback_tiles)
-
-    if len(current_guess) == 5:
-        render_feedback_row(current_guess, feedback)
-
-    apply_col, clear_col = st.columns([2, 1])
-
-    with apply_col:
-        apply_feedback = st.button(
-            "Apply feedback",
-            type="primary",
-            use_container_width=True,
-            disabled=(
-                not valid_guess
-                or not hard_legal
-                or st.session_state.solved
-            ),
-            key=(
-                f"apply_feedback_{st.session_state.game_id}_"
-                f"{len(st.session_state.history)}"
-            ),
-        )
-
-    with clear_col:
-        st.button(
-            "Clear colors",
-            use_container_width=True,
-            on_click=reset_feedback,
-            key=(
-                f"clear_feedback_{st.session_state.game_id}_"
-                f"{len(st.session_state.history)}"
-            ),
-        )
-
-    if apply_feedback:
-        fb_code = feedback_string_to_code(feedback)
-        gi = model.guess_index[current_guess]
-
-        st.session_state.history.append((current_guess, feedback))
-
-        if feedback == "22222":
-            st.session_state.solved = True
-        else:
-            st.session_state.candidates = model.filter_candidates_cached(
-                st.session_state.candidates,
-                gi,
-                fb_code,
+        with clear_col:
+            st.button(
+                "Clear colors",
+                use_container_width=True,
+                on_click=reset_feedback,
+                key=(
+                    f"clear_feedback_{st.session_state.game_id}_"
+                    f"{len(st.session_state.history)}"
+                ),
             )
 
-        reset_feedback()
+        if apply_feedback:
+            before_count = (
+                len(st.session_state.candidates)
+                + len(st.session_state.custom_candidates)
+            )
 
-        # Applying feedback changes the game state, so now we intentionally
-        # rerun the whole app and calculate a new recommendation.
-        st.rerun()
+            fb_code = feedback_string_to_code(feedback)
+            st.session_state.history.append((current_guess, feedback))
 
+            if feedback == "22222":
+                st.session_state.solved = True
+                after_count = 1
+            else:
+                st.session_state.candidates = filter_base_candidates(
+                    model,
+                    st.session_state.candidates,
+                    current_guess,
+                    fb_code,
+                )
+                st.session_state.custom_candidates = [
+                    answer
+                    for answer in st.session_state.custom_candidates
+                    if feedback_code(current_guess, answer) == fb_code
+                ]
+                after_count = (
+                    len(st.session_state.candidates)
+                    + len(st.session_state.custom_candidates)
+                )
 
-feedback_controls(
-    guess,
-    guess_valid,
-    hard_mode_legal,
-)
+            st.session_state.turn_stats.append({
+                "turn": len(st.session_state.history),
+                "guess": current_guess.upper(),
+                "before": before_count,
+                "after": after_count,
+                "removed": max(0, before_count - after_count),
+            })
 
-reset_col, spacer_col = st.columns([1, 2])
-with reset_col:
-    if st.button("Reset game", use_container_width=True):
-        reset_game(model)
-        st.rerun()
+            reset_feedback()
+            st.rerun()
 
-if st.session_state.solved:
-    solved_word = st.session_state.history[-1][0].upper()
-    st.success(
-        f"Solved with **{solved_word}** in "
-        f"**{len(st.session_state.history)} guesses**."
+    feedback_controls(
+        guess,
+        guess_valid,
+        hard_mode_legal,
+        candidate_only_legal,
     )
 
-st.divider()
-st.subheader("Top suggestions")
+    reset_col, spacer_col = st.columns([1, 2])
+    with reset_col:
+        if st.button("Reset game", use_container_width=True):
+            reset_game(model)
+            st.rerun()
 
-if ranked and not st.session_state.solved:
-    for index, (word, bits) in enumerate(ranked[:5], start=1):
-        cols = st.columns([1, 3, 2])
-        cols[0].markdown(f"**#{index}**")
-        cols[1].markdown(f"**{word.upper()}**")
-        cols[2].markdown(f"{bits:.3f} bits")
+    if st.session_state.solved:
+        solved_word = st.session_state.history[-1][0].upper()
+        st.success(
+            f"Solved with **{solved_word}** in "
+            f"**{len(st.session_state.history)} guesses**."
+        )
 
-    with st.expander("Show top 10"):
+    if st.session_state.history:
+        st.subheader("Game board")
+        for word, fb in st.session_state.history:
+            render_feedback_row(word, fb)
+
+with analysis_tab:
+    st.subheader("Recommendation analysis")
+
+    if ranked and not st.session_state.solved:
         st.dataframe(
             {
                 "Rank": list(range(1, len(ranked) + 1)),
-                "Guess": [word.upper() for word, _ in ranked],
-                "Expected information": [
-                    round(bits, 3) for _, bits in ranked
+                "Guess": [item["word"].upper() for item in ranked],
+                "Entropy": [
+                    round(float(item["entropy"]), 3)
+                    for item in ranked
+                ],
+                "Expected left": [
+                    round(float(item["expected_remaining"]), 1)
+                    for item in ranked
+                ],
+                "Worst case": [
+                    int(item["worst_case"])
+                    for item in ranked
+                ],
+                "Partitions": [
+                    int(item["partitions"])
+                    for item in ranked
+                ],
+                "Possible answer": [
+                    "Yes" if item["is_candidate"] else "No"
+                    for item in ranked
                 ],
             },
             hide_index=True,
             use_container_width=True,
         )
-elif not st.session_state.solved:
-    st.write("No suggestions are available.")
+    elif not st.session_state.solved:
+        st.write("No recommendations are available.")
 
-if st.session_state.history:
-    st.subheader("Game board")
-    for word, fb in st.session_state.history:
-        render_feedback_row(word, fb)
-
-if 1 < remaining <= 30 and not st.session_state.solved:
-    with st.expander(f"Show {remaining} remaining answers"):
-        st.write(
-            ", ".join(
-                model.answers[ai].upper()
-                for ai in st.session_state.candidates
-            )
+    if st.session_state.turn_stats:
+        st.subheader("Candidate reduction by turn")
+        st.dataframe(
+            st.session_state.turn_stats,
+            hide_index=True,
+            use_container_width=True,
         )
 
+    if not st.session_state.solved and remaining <= 50:
+        st.subheader("Remaining possible answers")
+        remaining_words = [
+            model.answers[ai].upper()
+            for ai in st.session_state.candidates
+        ]
+        remaining_words.extend(
+            word.upper()
+            for word in st.session_state.custom_candidates
+        )
+
+        if remaining_words:
+            st.write(", ".join(sorted(remaining_words)))
+        else:
+            st.write("None")
+
 st.caption(
-    f"{len(model.answers):,} possible answers • "
+    f"{len(model.answers):,} built-in answers • "
     f"{len(model.allowed_guesses):,} allowed guesses • "
-    f"{'Hard' if hard_mode else 'Normal'} Mode"
+    f"{len(st.session_state.custom_answers)} session additions"
 )
