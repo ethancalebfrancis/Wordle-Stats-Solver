@@ -18,5 +18,8 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check Python syntax
+        run: python -m py_compile app.py wordle_solver.py test_wordle_solver.py
+
       - name: Run solver tests
         run: python -m unittest -v test_wordle_solver.py
