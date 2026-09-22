@@ -88,8 +88,31 @@ def build_model() -> WordleModel:
     return WordleModel(answers, guesses, logger=None)
 
 
+@st.cache_data(show_spinner=False)
+def get_ranked_guesses(
+    _model: WordleModel,
+    candidate_idxs: tuple[int, ...],
+    strategy: str,
+    history: tuple[tuple[str, str], ...],
+    top_k: int = 10,
+):
+    """Cache expensive entropy ranking until the actual game state changes."""
+    return _model.rank_guesses_fast(
+        list(candidate_idxs),
+        strategy=strategy,
+        top_k=top_k,
+        history=list(history),
+    )
+
+
 def reset_feedback():
     st.session_state.feedback_tiles = [0, 0, 0, 0, 0]
+
+
+def cycle_feedback(index: int):
+    st.session_state.feedback_tiles[index] = (
+        st.session_state.feedback_tiles[index] + 1
+    ) % 3
 
 
 def reset_game(model: WordleModel):
@@ -163,11 +186,12 @@ with st.sidebar:
 
 strategy = "hard" if hard_mode else "all"
 
-ranked = model.rank_guesses_fast(
-    st.session_state.candidates,
-    strategy=strategy,
-    top_k=10,
-    history=st.session_state.history,
+ranked = get_ranked_guesses(
+    model,
+    tuple(st.session_state.candidates),
+    strategy,
+    tuple(st.session_state.history),
+    10,
 )
 
 remaining = len(st.session_state.candidates)
@@ -189,9 +213,6 @@ if not st.session_state.history and first_guess in model.guess_index:
     recommended = first_guess
 else:
     recommended = default_suggestion
-
-if "guess_input" not in st.session_state:
-    st.session_state.guess_input = recommended
 
 guess_key = (
     f"guess_input_{st.session_state.game_id}_"
@@ -231,61 +252,95 @@ elif guess_valid and hard_mode and not hard_mode_legal:
 
 st.write("Tap each tile to cycle **gray → yellow → green**.")
 
-tile_columns = st.columns(5)
-for i, col in enumerate(tile_columns):
-    letter = guess[i].upper() if len(guess) == 5 else "?"
-    state = st.session_state.feedback_tiles[i]
 
-    with col:
-        if st.button(
-            f"{FEEDBACK_LABELS[state]} {letter}",
-            key=f"feedback_tile_{i}",
+@st.fragment
+def feedback_controls(
+    current_guess: str,
+    valid_guess: bool,
+    hard_legal: bool,
+):
+    tile_columns = st.columns(5)
+
+    for i, col in enumerate(tile_columns):
+        letter = current_guess[i].upper() if len(current_guess) == 5 else "?"
+        state = st.session_state.feedback_tiles[i]
+
+        with col:
+            st.button(
+                f"{FEEDBACK_LABELS[state]} {letter}",
+                key=f"feedback_tile_{st.session_state.game_id}_{len(st.session_state.history)}_{i}",
+                use_container_width=True,
+                on_click=cycle_feedback,
+                args=(i,),
+            )
+
+    feedback = "".join(str(value) for value in st.session_state.feedback_tiles)
+
+    if len(current_guess) == 5:
+        render_feedback_row(current_guess, feedback)
+
+    apply_col, clear_col = st.columns([2, 1])
+
+    with apply_col:
+        apply_feedback = st.button(
+            "Apply feedback",
+            type="primary",
             use_container_width=True,
-        ):
-            st.session_state.feedback_tiles[i] = (state + 1) % 3
-            st.rerun()
-
-feedback = "".join(str(value) for value in st.session_state.feedback_tiles)
-
-if len(guess) == 5:
-    render_feedback_row(guess, feedback)
-
-apply_col, new_col = st.columns([2, 1])
-
-with apply_col:
-    apply_feedback = st.button(
-        "Apply feedback",
-        type="primary",
-        use_container_width=True,
-        disabled=(
-            not guess_valid
-            or not hard_mode_legal
-            or st.session_state.solved
-        ),
-    )
-
-with new_col:
-    if st.button("Reset", use_container_width=True):
-        reset_game(model)
-        st.rerun()
-
-if apply_feedback:
-    fb_code = feedback_string_to_code(feedback)
-    gi = model.guess_index[guess]
-
-    st.session_state.history.append((guess, feedback))
-
-    if feedback == "22222":
-        st.session_state.solved = True
-    else:
-        st.session_state.candidates = model.filter_candidates_cached(
-            st.session_state.candidates,
-            gi,
-            fb_code,
+            disabled=(
+                not valid_guess
+                or not hard_legal
+                or st.session_state.solved
+            ),
+            key=(
+                f"apply_feedback_{st.session_state.game_id}_"
+                f"{len(st.session_state.history)}"
+            ),
         )
 
-    reset_feedback()
-    st.rerun()
+    with clear_col:
+        st.button(
+            "Clear colors",
+            use_container_width=True,
+            on_click=reset_feedback,
+            key=(
+                f"clear_feedback_{st.session_state.game_id}_"
+                f"{len(st.session_state.history)}"
+            ),
+        )
+
+    if apply_feedback:
+        fb_code = feedback_string_to_code(feedback)
+        gi = model.guess_index[current_guess]
+
+        st.session_state.history.append((current_guess, feedback))
+
+        if feedback == "22222":
+            st.session_state.solved = True
+        else:
+            st.session_state.candidates = model.filter_candidates_cached(
+                st.session_state.candidates,
+                gi,
+                fb_code,
+            )
+
+        reset_feedback()
+
+        # Applying feedback changes the game state, so now we intentionally
+        # rerun the whole app and calculate a new recommendation.
+        st.rerun()
+
+
+feedback_controls(
+    guess,
+    guess_valid,
+    hard_mode_legal,
+)
+
+reset_col, spacer_col = st.columns([1, 2])
+with reset_col:
+    if st.button("Reset game", use_container_width=True):
+        reset_game(model)
+        st.rerun()
 
 if st.session_state.solved:
     solved_word = st.session_state.history[-1][0].upper()
